@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cron-next-fire-dst"
+version = "0.1.0"
+description = "Stdlib-only 5-field cron parser with Vixie day-of-month/day-of-week OR semantics, DST-aware wall-clock firing times and a brute-force minute scanner."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = []
+authors = [{ name = "sparkx313" }]
+keywords = ["cron", "vixie", "dst", "zoneinfo", "scheduler"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Topic :: System :: Systems Administration",
+]
+
+[tool.setuptools]
+packages = ["cronlib"]

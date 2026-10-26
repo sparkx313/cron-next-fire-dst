@@ -1,0 +1,202 @@
+cron-next-fire-dst benchmarks - python 3.11.9
+measures: fast next_fire against a brute-force minute scanner, the
+Vixie OR/AND reading, DST wall-clock firings, leap skips, cost.
+
+zoneinfo module=True tzdata=True zones=598
+==============================================================================
+1. fast next_fire versus brute-force minute scanner (deterministic)
+==============================================================================
+zones: America/New_York and Australia/Lord_Howe, both with a 2025
+transition inside the audited windows
+case                   exprs  windows  minutes    firings  mismatches
+tz=None (wall only)    38     4        656792     2237     0
+UTC shipped            12     2        103704     327      0
+New_York shipped       12     2        103704     273      0
+Lord_Howe shipped      12     2        103704     275      0
+UTC legacy             5      2        43210      198      0
+New_York legacy        5      2        43210      192      8
+Lord_Howe legacy       5      2        43210      193      5
+
+Interpretation: the shipped fast path and the minute-by-minute scanner agree
+  on every one of the 224 audited (expression, window) pairs - the table's
+  windows column counts distinct time windows per row, this counts one audit
+  per expression: 3112 firings compared over 967904 scanned minutes, 0
+  mismatches. The naive reading (a wall minute that the clock jumped over is
+  still treated as a firing) is the version we shipped first: over a further
+  30 such pairs against the same scanner it produces 13 phantom firings in the
+  two DST zones, 8 in America/New_York and 5 in Australia/Lord_Howe, plus 0 in
+  UTC where there is no gap to invent - the disagreement was a real semantic
+  bug, not a rounding artefact.
+==============================================================================
+2. Vixie day-of-month / day-of-week: OR versus AND (deterministic)
+==============================================================================
+expr              or-days   and-days   or-fires   and-fires   delta
+0 0 1 * 5         63        1          63         1           62
+0 0 13 * 5        61        3          61         3           58
+0 0 15 * 1        63        1          63         1           62
+0 0 1 * 0         61        3          61         3           58
+*/30 9 1 * 5      63        1          126        2           124
+0 0 1-7 * 1       124       12         124        12          112
+0 0 29 * 2        61        2          61         2           59
+0 0 1 jan mon     5         0          5          0           5
+0 0 31 * 3        59        0          59         0           59
+*/10 0 */2 * 6    211       27         1266       162         1104
+0 0 5-12 * 0      134       14         134        14          120
+0 0 20 * fri      61        3          61         3           58
+0 0 1 * *         12        12         12         12          0
+0 0 * * 5         52        52         52         52          0
+
+Interpretation: 12 of the 14 expressions restrict both day fields, which is
+  the only case where the two readings can differ; on those the OR reading
+  fires 2084 times per year against 203 under AND, so an AND reading silently
+  drops 1881 firings a year (a factor of 10.27). The 2 control rows, one day
+  field bare, agree exactly: their combined difference is 0 firings, and 12 of
+  the 14 rows differ at all. The worst single row is '*/10 0 */2 * 6' at 1104
+  extra firings a year, so the choice is not a rounding difference - it is a
+  different schedule.
+==============================================================================
+3. DST wall-clock jobs across transitions (deterministic)
+==============================================================================
+zone        window       expr            fires   every-pass   gap-min  ovl-min
+New_York    03-08..03-12 0 2 * * *       3       3            60       0
+New_York    03-08..03-12 30 1 * * *      4       4            60       0
+New_York    10-31..11-04 30 1 * * *      4       5            0        60
+New_York    10-31..11-04 */10 1 * * *    24      30           0        60
+Lord_Howe   10-03..10-07 */10 2 * * *    21      21           30       0
+Lord_Howe   04-04..04-08 30 1 * * *      4       5            0        30
+Lord_Howe   04-04..04-08 */10 1 * * *    24      27           0        30
+
+zone        expr            window       utc-fires  utc-gap-min
+New_York    0 2 * * *       03-08..03-12 4          0
+New_York    30 1 * * *      03-08..03-12 4          0
+New_York    30 1 * * *      10-31..11-04 4          0
+New_York    */10 1 * * *    10-31..11-04 24         0
+Lord_Howe   */10 2 * * *    10-03..10-07 24         0
+Lord_Howe   30 1 * * *      04-04..04-08 4          0
+Lord_Howe   */10 1 * * *    04-04..04-08 24         0
+
+Interpretation: across the 7 wall-clock cases the chosen first-pass rule emits
+  84 firings and the every-pass rule emits 95, so 11 firings sit on a wall
+  minute the clock passed twice; the same windows contain 180 overlap minutes
+  in total, and the other 169 are minutes no expression in this table
+  schedules. The 150 gap minutes cost both rules nothing, because a minute the
+  clock jumped over never occurs as an instant.
+
+Interpretation: Lord Howe is the nastier zone: its shift is only 30 minutes,
+  so its two windows hold 30 gap and 60 overlap minutes. The 10-minute job
+  '*/10 2 * * *' fires 21 times there against 24 for the same expression read
+  in UTC; that 3-firing shortfall is this job's share of the 30 gap minutes in
+  its window, since the rest of the jumped minutes fall outside the minutes it
+  schedules. The UTC control is the honest answer for a job that may not skip:
+  7 expressions fire 88 times in UTC against 84 locally, with 0 gap and 0
+  overlap minutes, and on New York's spring-forward night the daily '0 2 * *
+  *' fires on 3 of the 4 02:00s in its window.
+==============================================================================
+4. leap day and end-of-month skips, 40 years (deterministic)
+==============================================================================
+expr             matched   month-slots   skipped   first gap (months)
+0 0 29 2 *       10        480           470       48
+0 0 31 * *       280       480           200       2
+0 0 30 * *       440       480           40        2
+29 2 29 2 *      10        480           470       48
+0 0 30 2 *       0         480           480       none
+0 0 29 * *       450       480           30        2
+
+Interpretation: over 40 years a monthly job on the 29th of February gets 480
+  month slots but matches 10 days, so 470 of them are silently skipped - the
+  worst wait is 48 months between firings, not 12. Day 31 in every month keeps
+  280 of 480 slots (200 skips, the four short months plus February), and '0 0
+  30 * *' has no long gap at all because every month except February has a
+  30th. The naive reading of '0 0 30 2 *' is a job that runs on February 30th;
+  the exhaustive day scan finds 0 matching days in 40 years, and the fast path
+  agrees by refusing to answer: next_fire raises CronSearchLimitError after 8
+  years instead of inventing a date.
+
+search limit behaviour for '0 0 30 2 *': raised=True
+==============================================================================
+5. parse and next_fire cost, with measured noise floor (timing)
+==============================================================================
+work                                 n       best ms   floor ms  per op us
+parse full 5-field expression        20000   279.879   8.254     13.99
+next_fire dense */7 3 * * *          20000   86.639    5.277     4.33
+next_fire daily 0 0 * * *            20000   967.719   84.539    48.39
+next_fire weekly 0 0 * * 1           10000   50.249    1.643     5.02
+next_fire leap 0 0 29 2 *            3000    210.888   6.249     70.30
+next_fire */20 * * * * tz=None       2000    24.437    0.170     12.22
+next_fire */20 * * * * tz=New_York   2000    111.870   33.339    55.93
+
+Interpretation: each row's floor column is its own tie band: the same-batch
+  spreads run from 0.7% to 29.8% of a row's best pass on this loaded machine,
+  so numbers inside one row's band are a tie and no ranking below leans on
+  them. Normalised to one call the ordering is dense 4.33 us, weekly 5.02 us,
+  daily 48.39 us, leap 70.30 us: cost follows how many hours and minutes the
+  carry walk visits, not how often the job fires. The leap-day query is 16.2x
+  dense, outside both floors (3.0% and 6.1%), because a sparse expression
+  carries the search across whole months and years instead of testing minutes,
+  while weekly is only 1.16x dense - outside both rows' own floors, so it is
+  real. The daily row is the slowest of the three non-sparse ones at 11.2x
+  dense, because reaching the next midnight walks the hour list once and the
+  minute list once.
+
+Interpretation: the DST check is measurable but small: the same '*/20 * * * *'
+  query starting 20 minutes before a spring-forward gap costs 55.93 us with a
+  zone against 12.22 us with tz=None, a 4.58x ratio, because minute_status
+  only runs on the candidate minutes that survive field matching. Parsing is
+  the surprise: 13.99 us per expression is 3.2x one dense next_fire call, so
+  re-parsing on every tick would dominate the arithmetic - build the
+  CronSchedule once and reuse it.
+==============================================================================
+6. malformed input contract (deterministic)
+==============================================================================
+code                field         token          message tail
+EMPTY_EXPRESSION    expression                   expression is empty (got '')
+EMPTY_EXPRESSION    expression                   expression is empty (got ...
+WRONG_FIELD_COUNT   expression    0 0 1 *        expression must have exac...
+WRONG_FIELD_COUNT   expression    0 0 1 * * 5    expression must have exac...
+WRONG_FIELD_COUNT   expression    @daily         expression must have exac...
+WRONG_FIELD_COUNT   expression    */2 */2 */2 */2 expression must have exac...
+OUT_OF_RANGE        minute        60             value out of range 60, fi...
+OUT_OF_RANGE        minute        60             value out of range 60, fi...
+NON_POSITIVE_STEP   minute        */0            step is zero or negative:...
+OUT_OF_RANGE        hour          24             value out of range 24, fi...
+NON_POSITIVE_STEP   hour          */0            step is zero or negative:...
+OUT_OF_RANGE        day_of_month  32             value out of range 32, fi...
+OUT_OF_RANGE        day_of_month  32             value out of range 32, fi...
+OUT_OF_RANGE        day_of_month  0              value out of range 0, fie...
+NON_POSITIVE_STEP   day_of_month  30-31/0        step is zero or negative:...
+OUT_OF_RANGE        month         13             value out of range 13, fi...
+OUT_OF_RANGE        month         0              value out of range 0, fie...
+UNKNOWN_NAME        month         foo            unknown month or weekday ...
+UNKNOWN_NAME        month         mon            unknown month or weekday ...
+OUT_OF_RANGE        day_of_week   8              value out of range 8, fie...
+UNKNOWN_NAME        day_of_week   jan            unknown month or weekday ...
+OUT_OF_RANGE        day_of_week   8              value out of range 8, fie...
+EMPTY_ITEM          minute        0,             empty item in list (got '...
+EMPTY_ITEM          minute        5,,6           empty item in list (got '...
+STEP_WITHOUT_RANGE  minute        /5             step without a range or s...
+TOO_MANY_STEPS      minute        */2/3          more than one step separa...
+NOT_AN_INTEGER      minute        */x            step is not an integer (g...
+REVERSED_RANGE      minute        50-10          reversed range: 10 after ...
+EMPTY_RANGE_END     minute        5-             range has no end (got '5-')
+EMPTY_RANGE_START   minute        -5             range has no start (got '...
+NOT_A_NUMBER        day_of_month  ?              not a number (got '?')
+NOT_A_NUMBER        day_of_week   $              not a number (got '$')
+EMPTY_ITEM          day_of_week   1,,2           empty item in list (got '...
+EMPTY_RANGE_END     day_of_week   SUN-           range has no end (got 'SU...
+ACCEPTED-BORDERLINE -             0 0 30-31/40 * * wide step keeps only 30
+ACCEPTED-BORDERLINE -             5/70 * * * *   wide step keeps only 5
+ACCEPTED-BORDERLINE -             0 0 * * 0-7    7 wraps into Sunday
+
+Interpretation: 34 malformed patterns were offered, 34 were rejected, and 0
+  were accepted (that is the honest count - an accepted pattern would mean the
+  parser is more permissive than its documented contract). Every rejection
+  message names the offending field in 34 of 34 cases, 0 messages carried a
+  different field name than this table expected and 0 a different error code;
+  a non-zero value in either column is a contract break, not a style note. The
+  parser never raises anything other than CronParseError (a ValueError
+  subclass), so callers can catch exactly one type.
+
+Interpretation: the 3 ACCEPTED-BORDERLINE rows are legal by design, not
+  misses: a step wider than its range keeps only the range start, and a
+  weekday range reaching 7 wraps into Sunday, so '0 0 * * 0-7' matches all
+  seven days instead of being rejected as out of range.
